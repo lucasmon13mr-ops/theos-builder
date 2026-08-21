@@ -1,1 +1,90 @@
 
+# Copie este arquivo para o repositório que vai fazer as compilações,
+# no caminho: .github/workflows/theos-build.yml
+#
+# Esse repositório é o que você configura em GITHUB_REPO no backend
+# (ex: GITHUB_REPO=Zolmea/theos-builder).
+#
+# O que ele faz: baixa o Theos + toolchain iOS num runner Ubuntu do GitHub
+# (a mesma ideia de usar um Codespace, só que automatizado via Actions,
+# sem precisar deixar um Codespace ligado o tempo todo), baixa o ZIP do
+# projeto enviado pelo seu site, roda "make package", e sobe o .deb/.dylib
+# gerado como "artifact" pra o backend baixar de volta.
+
+name: theos-build
+
+on:
+  workflow_dispatch:
+    inputs:
+      marker:
+        description: 'ID único desta compilação (usado pelo backend pra identificar o run)'
+        required: true
+      download_url:
+        description: 'URL temporária de onde baixar o ZIP do projeto'
+        required: true
+      bundle_id:
+        description: 'Bundle ID do app alvo'
+        required: true
+      project_name:
+        description: 'Nome do projeto'
+        required: true
+      package_id:
+        description: 'ID do pacote ZOLMEA API (pra buscar o SDK certo, se aplicável)'
+        required: false
+
+# Isso faz o "nome" da execução conter o marker, pra o backend achar o run certo depois.
+run-name: "build-${{ inputs.marker }}"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Baixar o projeto ZIP enviado pelo site
+        run: |
+          curl -L "${{ inputs.download_url }}" -o project.zip
+          mkdir -p project
+          unzip -q project.zip -d project
+
+      - name: Instalar dependências base
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y curl git perl make clang lld libtinfo-dev libssl-dev fakeroot rsync
+
+      - name: Instalar o Theos
+        env:
+          THEOS: /opt/theos
+        run: |
+          sudo git clone --recursive https://github.com/theos/theos.git $THEOS
+          echo "THEOS=$THEOS" >> $GITHUB_ENV
+
+      - name: Instalar SDK iOS (theos/sdks)
+        env:
+          THEOS: /opt/theos
+        run: |
+          sudo git clone -n --depth=1 --filter=tree:0 https://github.com/theos/sdks.git /tmp/sdks
+          cd /tmp/sdks && sudo git sparse-checkout set --no-cone "iPhoneOS16.5.sdk" && sudo git checkout
+          sudo mkdir -p $THEOS/sdks
+          sudo mv /tmp/sdks/iPhoneOS16.5.sdk $THEOS/sdks/
+
+      - name: Compilar o projeto (make package)
+        env:
+          THEOS: /opt/theos
+        working-directory: project
+        run: |
+          # Se o Makefile estiver um nível abaixo (zip com pasta interna), entra nela.
+          if [ ! -f Makefile ]; then
+            cd "$(find . -maxdepth 2 -name Makefile -exec dirname {} \; | head -n1)"
+          fi
+          make clean package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless 2>&1 | tee /tmp/build.log
+          mkdir -p /tmp/artifacts
+          find . -name "*.deb" -exec cp {} /tmp/artifacts/ \;
+          find . -path "*/obj/*" -name "*.dylib" -exec cp {} /tmp/artifacts/ \;
+          cp /tmp/build.log /tmp/artifacts/build.log
+
+      - name: Publicar artefatos
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-output-${{ inputs.marker }}
+          path: /tmp/artifacts/*
+          retention-days: 3
