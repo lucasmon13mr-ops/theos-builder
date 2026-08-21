@@ -1,16 +1,4 @@
 
-# Copie este arquivo para o repositório que vai fazer as compilações,
-# no caminho: .github/workflows/theos-build.yml
-#
-# Esse repositório é o que você configura em GITHUB_REPO no backend
-# (ex: GITHUB_REPO=Zolmea/theos-builder).
-#
-# O que ele faz: baixa o Theos + toolchain iOS num runner Ubuntu do GitHub
-# (a mesma ideia de usar um Codespace, só que automatizado via Actions,
-# sem precisar deixar um Codespace ligado o tempo todo), baixa o ZIP do
-# projeto enviado pelo seu site, roda "make package", e sobe o .deb/.dylib
-# gerado como "artifact" pra o backend baixar de volta.
-
 name: theos-build
 
 on:
@@ -32,7 +20,6 @@ on:
         description: 'ID do pacote ZOLMEA API (pra buscar o SDK certo, se aplicável)'
         required: false
 
-# Isso faz o "nome" da execução conter o marker, pra o backend achar o run certo depois.
 run-name: "build-${{ inputs.marker }}"
 
 jobs:
@@ -72,7 +59,6 @@ jobs:
           THEOS: /opt/theos
         working-directory: project
         run: |
-          # Se o Makefile estiver um nível abaixo (zip com pasta interna), entra nela.
           if [ ! -f Makefile ]; then
             cd "$(find . -maxdepth 2 -name Makefile -exec dirname {} \; | head -n1)"
           fi
