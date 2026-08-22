@@ -1,7 +1,3 @@
-
-# Substitua o conteúdo do arquivo .github/workflows/theos-build.yml
-# no seu repositório theos-builder por este aqui.
-
 name: theos-build
 
 on:
@@ -69,6 +65,8 @@ jobs:
           THEOS: /opt/theos
         working-directory: project
         run: |
+          set -eo pipefail
+
           # Entra no diretório certo caso o ZIP tenha uma pasta-raiz única em vez do Makefile na raiz.
           if [ ! -f Makefile ]; then
             cd "$(find . -maxdepth 2 -name Makefile -exec dirname {} \; | head -n1)"
@@ -84,27 +82,36 @@ jobs:
             echo "-> Makefile não incluía common.mk do Theos. Adicionando..."
             printf '\ninclude $(THEOS)/makefiles/common.mk\n' >> Makefile
           fi
-          # Se por algum motivo THEOS_MAKE_PATH não ficar definido depois do include acima
-          # (aconteceu em runners com checkout parcial do Theos), força o valor correto na mão,
-          # logo depois da linha do include, pra não quebrar o "include $(THEOS_MAKE_PATH)/tweak.mk" mais abaixo.
+          # Se por algum motivo THEOS_MAKE_PATH não ficar definido depois do include acima, força na mão.
           if ! grep -q '^THEOS_MAKE_PATH' Makefile; then
             echo "-> THEOS_MAKE_PATH ausente. Definindo manualmente..."
             sed -i '/THEOS)\/makefiles\/common\.mk/a THEOS_MAKE_PATH := $(THEOS)/makefiles' Makefile
           fi
-          # Se o projeto não tiver nenhum include de tweak.mk/library.mk/tool.mk no final, avisa
-          # (não tenta adivinhar o tipo de projeto sozinho pra não gerar um .deb quebrado).
           if ! grep -qE 'include \$\(THEOS_MAKE_PATH\)/(tweak|library|tool|application)\.mk' Makefile; then
             echo "AVISO: não encontrei nenhum include de tweak.mk/library.mk/tool.mk no Makefile — o projeto pode não ser um projeto Theos padrão."
           fi
 
           echo "== Makefile final usado na compilação =="
           cat Makefile
+
           echo "== Compilando =="
-          make clean package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless 2>&1 | tee /tmp/build.log
+          # Passa THEOS=/opt/theos direto na linha de comando: isso tem prioridade máxima no make e
+          # sobrescreve qualquer "THEOS = /var/theos" (ou outro caminho) fixado dentro do Makefile do projeto.
+          make THEOS="$THEOS" clean package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless 2>&1 | tee /tmp/build.log
+          BUILD_EXIT=${PIPESTATUS[0]}
+
           mkdir -p /tmp/artifacts
           find . -name "*.deb" -exec cp {} /tmp/artifacts/ \;
           find . -path "*/obj/*" -name "*.dylib" -exec cp {} /tmp/artifacts/ \;
           cp /tmp/build.log /tmp/artifacts/build.log
+
+          # Só considera sucesso se o make retornou 0 E pelo menos um artefato (.deb ou .dylib) foi gerado.
+          ARTIFACT_COUNT=$(find /tmp/artifacts -name "*.deb" -o -name "*.dylib" | wc -l)
+          if [ "$BUILD_EXIT" -ne 0 ] || [ "$ARTIFACT_COUNT" -eq 0 ]; then
+            echo "ERRO: a compilação falhou ou não gerou nenhum .deb/.dylib. Veja build.log nos artefatos."
+            exit 1
+          fi
+          echo "Compilação concluída com sucesso: $ARTIFACT_COUNT artefato(s) gerado(s)."
 
       - name: Publicar artefatos
         uses: actions/upload-artifact@v4
