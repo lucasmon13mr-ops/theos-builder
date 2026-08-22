@@ -1,4 +1,7 @@
 
+# Substitua o conteúdo do arquivo .github/workflows/theos-build.yml
+# no seu repositório theos-builder por este aqui.
+
 name: theos-build
 
 on:
@@ -17,7 +20,7 @@ on:
         description: 'Nome do projeto'
         required: true
       package_id:
-        description: 'ID do pacote ZOLMEA API (pra buscar o SDK certo, se aplicável)'
+        description: 'ID do pacote ZOLMEA API (para buscar o SDK certo, se aplicável)'
         required: false
 
 run-name: "build-${{ inputs.marker }}"
@@ -44,6 +47,12 @@ jobs:
         run: |
           sudo git clone --recursive https://github.com/theos/theos.git $THEOS
           echo "THEOS=$THEOS" >> $GITHUB_ENV
+          # Confere se o Theos veio completo (às vezes o clone --recursive falha silenciosamente em algum submódulo).
+          if [ ! -f "$THEOS/makefiles/common.mk" ]; then
+            echo "ERRO: o Theos não foi instalado corretamente — falta $THEOS/makefiles/common.mk"
+            sudo git -C $THEOS submodule update --init --recursive
+          fi
+          test -f "$THEOS/makefiles/common.mk" && echo "Theos OK: common.mk encontrado."
 
       - name: Instalar SDK iOS (theos/sdks)
         env:
@@ -53,15 +62,44 @@ jobs:
           cd /tmp/sdks && sudo git sparse-checkout set --no-cone "iPhoneOS16.5.sdk" && sudo git checkout
           sudo mkdir -p $THEOS/sdks
           sudo mv /tmp/sdks/iPhoneOS16.5.sdk $THEOS/sdks/
+          ls $THEOS/sdks
 
       - name: Compilar o projeto (make package)
         env:
           THEOS: /opt/theos
         working-directory: project
         run: |
+          # Entra no diretório certo caso o ZIP tenha uma pasta-raiz única em vez do Makefile na raiz.
           if [ ! -f Makefile ]; then
             cd "$(find . -maxdepth 2 -name Makefile -exec dirname {} \; | head -n1)"
           fi
+
+          echo "== Verificando THEOS =="
+          echo "THEOS=$THEOS"
+          test -f "$THEOS/makefiles/common.mk" || { echo "ERRO FATAL: $THEOS/makefiles/common.mk não existe. A instalação do Theos falhou."; exit 1; }
+
+          echo "== Auto-reparo do Makefile (se necessário) =="
+          # Garante que o Makefile inclui o common.mk do Theos (necessário pra definir THEOS_MAKE_PATH).
+          if ! grep -q 'THEOS)/makefiles/common.mk' Makefile; then
+            echo "-> Makefile não incluía common.mk do Theos. Adicionando..."
+            printf '\ninclude $(THEOS)/makefiles/common.mk\n' >> Makefile
+          fi
+          # Se por algum motivo THEOS_MAKE_PATH não ficar definido depois do include acima
+          # (aconteceu em runners com checkout parcial do Theos), força o valor correto na mão,
+          # logo depois da linha do include, pra não quebrar o "include $(THEOS_MAKE_PATH)/tweak.mk" mais abaixo.
+          if ! grep -q '^THEOS_MAKE_PATH' Makefile; then
+            echo "-> THEOS_MAKE_PATH ausente. Definindo manualmente..."
+            sed -i '/THEOS)\/makefiles\/common\.mk/a THEOS_MAKE_PATH := $(THEOS)/makefiles' Makefile
+          fi
+          # Se o projeto não tiver nenhum include de tweak.mk/library.mk/tool.mk no final, avisa
+          # (não tenta adivinhar o tipo de projeto sozinho pra não gerar um .deb quebrado).
+          if ! grep -qE 'include \$\(THEOS_MAKE_PATH\)/(tweak|library|tool|application)\.mk' Makefile; then
+            echo "AVISO: não encontrei nenhum include de tweak.mk/library.mk/tool.mk no Makefile — o projeto pode não ser um projeto Theos padrão."
+          fi
+
+          echo "== Makefile final usado na compilação =="
+          cat Makefile
+          echo "== Compilando =="
           make clean package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless 2>&1 | tee /tmp/build.log
           mkdir -p /tmp/artifacts
           find . -name "*.deb" -exec cp {} /tmp/artifacts/ \;
