@@ -35,7 +35,7 @@ jobs:
       - name: Instalar dependências base
         run: |
           sudo apt-get update -y
-          sudo apt-get install -y curl git perl make clang lld libtinfo-dev libssl-dev fakeroot rsync
+          sudo apt-get install -y curl git perl make clang lld libtinfo-dev libssl-dev fakeroot rsync unzip
 
       - name: Instalar o Theos
         env:
@@ -60,26 +60,34 @@ jobs:
           sudo mv /tmp/sdks/iPhoneOS16.5.sdk $THEOS/sdks/
           ls $THEOS/sdks
 
-      - name: Instalar o toolchain (via script oficial do Theos)
+      - name: Instalar o toolchain (compilador cross-platform Linux -> iOS)
         env:
           THEOS: /opt/theos
         run: |
-          # Usa o script oficial do Theos para baixar e instalar o toolchain
-          # Isso é mais confiável que baixar de um release do GitHub
-          sudo $THEOS/bin/install.sh toolchain
+          # Baixa o toolchain do repositório oficial do Theos
+          cd /tmp
+          sudo git clone https://github.com/theos/toolchain.git
+          cd toolchain
+          sudo ./install.sh
+          sudo cp -r toolchain $THEOS/
+          cd ..
+          sudo rm -rf toolchain
           
-          # Verifica se o toolchain foi instalado corretamente
+          # Verifica se foi instalado corretamente
           if [ ! -f "$THEOS/toolchain/linux/iphone/bin/clang" ]; then
             echo "ERRO: toolchain não instalado corretamente. Tentando método alternativo..."
             
-            # Método alternativo: usar o script de setup do Theos
-            cd /tmp
-            git clone https://github.com/theos/theos.git theos-temp
-            cd theos-temp
-            sudo ./install.sh toolchain
-            sudo cp -r toolchain $THEOS/
-            cd ..
-            rm -rf theos-temp
+            # Método alternativo: baixar do release do L1ghtmann com URL verificada
+            curl -L "https://github.com/L1ghtmann/llvm-project/releases/download/16.0.0/iOSToolchain.tar.xz" -o iOSToolchain.tar.xz
+            if [ -f iOSToolchain.tar.xz ] && file iOSToolchain.tar.xz | grep -q "XZ compressed"; then
+              sudo mkdir -p $THEOS/toolchain
+              sudo tar -xf iOSToolchain.tar.xz -C $THEOS/toolchain
+              sudo chown -R $(whoami) $THEOS/toolchain
+              rm iOSToolchain.tar.xz
+            else
+              echo "ERRO: Falha ao baixar toolchain alternativo"
+              exit 1
+            fi
           fi
           
           test -f "$THEOS/toolchain/linux/iphone/bin/clang" || { echo "ERRO FATAL: toolchain não instalado corretamente"; exit 1; }
