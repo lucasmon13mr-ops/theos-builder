@@ -1,154 +1,38 @@
-name: theos-build
+name: Build Tweak
 
-on:
+on:   
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
   workflow_dispatch:
-    inputs:
-      marker:
-        description: 'ID único desta compilação (usado pelo backend pra identificar o run)'
-        required: true
-      download_url:
-        description: 'URL temporária de onde baixar o ZIP do projeto'
-        required: true
-      bundle_id:
-        description: 'Bundle ID do app alvo'
-        required: true
-      project_name:
-        description: 'Nome do projeto'
-        required: true
-      package_id:
-        description: 'ID do pacote ZOLMEA API (para buscar o SDK certo, se aplicável)'
-        required: false
-
-run-name: "build-${{ inputs.marker }}"
 
 jobs:
   build:
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
+    runs-on: macos-latest
+
     steps:
-      - name: Baixar o projeto ZIP enviado pelo site
+      - uses: actions/checkout@v4
+
+      - name: Install Theos
         run: |
-          curl -L "${{ inputs.download_url }}" -o project.zip
-          mkdir -p project
-          unzip -q project.zip -d project
+          git clone --recursive https://github.com/theos/theos.git $HOME/theos
+          echo "THEOS=$HOME/theos" >> $GITHUB_ENV
+          echo "$HOME/theos/bin" >> $GITHUB_PATH
 
-      - name: Instalar dependências base
+      - name: Install ldid
         run: |
-          sudo apt-get update -y
-          sudo apt-get install -y curl git perl make clang lld libtinfo-dev libssl-dev fakeroot rsync unzip
+          brew install ldid
 
-      - name: Instalar o Theos
-        env:
-          THEOS: /opt/theos
+      - name: Build with Theos
         run: |
-          sudo git clone --recursive https://github.com/theos/theos.git $THEOS
-          echo "THEOS=$THEOS" >> $GITHUB_ENV
-          # Confere se o Theos veio completo (às vezes o clone --recursive falha silenciosamente em algum submódulo).
-          if [ ! -f "$THEOS/makefiles/common.mk" ]; then
-            echo "ERRO: o Theos não foi instalado corretamente — falta $THEOS/makefiles/common.mk"
-            sudo git -C $THEOS submodule update --init --recursive
-          fi
-          test -f "$THEOS/makefiles/common.mk" && echo "Theos OK: common.mk encontrado."
+          make clean
+          make
 
-      - name: Instalar SDK iOS (theos/sdks)
-        env:
-          THEOS: /opt/theos
-        run: |
-          sudo git clone -n --depth=1 --filter=tree:0 https://github.com/theos/sdks.git /tmp/sdks
-          cd /tmp/sdks && sudo git sparse-checkout set --no-cone "iPhoneOS16.5.sdk" && sudo git checkout
-          sudo mkdir -p $THEOS/sdks
-          sudo mv /tmp/sdks/iPhoneOS16.5.sdk $THEOS/sdks/
-          ls $THEOS/sdks
-
-      - name: Instalar o toolchain (compilador cross-platform Linux -> iOS)
-        env:
-          THEOS: /opt/theos
-        run: |
-          # Baixa o toolchain do repositório oficial do Theos
-          cd /tmp
-          sudo git clone https://github.com/theos/toolchain.git
-          cd toolchain
-          sudo ./install.sh
-          sudo cp -r toolchain $THEOS/
-          cd ..
-          sudo rm -rf toolchain
-          
-          # Verifica se foi instalado corretamente
-          if [ ! -f "$THEOS/toolchain/linux/iphone/bin/clang" ]; then
-            echo "ERRO: toolchain não instalado corretamente. Tentando método alternativo..."
-            
-            # Método alternativo: baixar do release do L1ghtmann com URL verificada
-            curl -L "https://github.com/L1ghtmann/llvm-project/releases/download/16.0.0/iOSToolchain.tar.xz" -o iOSToolchain.tar.xz
-            if [ -f iOSToolchain.tar.xz ] && file iOSToolchain.tar.xz | grep -q "XZ compressed"; then
-              sudo mkdir -p $THEOS/toolchain
-              sudo tar -xf iOSToolchain.tar.xz -C $THEOS/toolchain
-              sudo chown -R $(whoami) $THEOS/toolchain
-              rm iOSToolchain.tar.xz
-            else
-              echo "ERRO: Falha ao baixar toolchain alternativo"
-              exit 1
-            fi
-          fi
-          
-          test -f "$THEOS/toolchain/linux/iphone/bin/clang" || { echo "ERRO FATAL: toolchain não instalado corretamente"; exit 1; }
-          echo "Toolchain OK: $($THEOS/toolchain/linux/iphone/bin/clang --version | head -n1)"
-
-      - name: Compilar o projeto (make package)
-        env:
-          THEOS: /opt/theos
-        working-directory: project
-        run: |
-          set -eo pipefail
-
-          # Entra no diretório certo caso o ZIP tenha uma pasta-raiz única em vez do Makefile na raiz.
-          if [ ! -f Makefile ]; then
-            cd "$(find . -maxdepth 2 -name Makefile -exec dirname {} \; | head -n1)"
-          fi
-
-          echo "== Verificando THEOS =="
-          echo "THEOS=$THEOS"
-          test -f "$THEOS/makefiles/common.mk" || { echo "ERRO FATAL: $THEOS/makefiles/common.mk não existe. A instalação do Theos falhou."; exit 1; }
-
-          echo "== Auto-reparo do Makefile (se necessário) =="
-          # Garante que o Makefile inclui o common.mk do Theos (necessário pra definir THEOS_MAKE_PATH).
-          if ! grep -q 'THEOS)/makefiles/common.mk' Makefile; then
-            echo "-> Makefile não incluía common.mk do Theos. Adicionando..."
-            printf '\ninclude $(THEOS)/makefiles/common.mk\n' >> Makefile
-          fi
-          # Se por algum motivo THEOS_MAKE_PATH não ficar definido depois do include acima, força na mão.
-          if ! grep -q '^THEOS_MAKE_PATH' Makefile; then
-            echo "-> THEOS_MAKE_PATH ausente. Definindo manualmente..."
-            sed -i '/THEOS)\/makefiles\/common\.mk/a THEOS_MAKE_PATH := $(THEOS)/makefiles' Makefile
-          fi
-          if ! grep -qE 'include \$\(THEOS_MAKE_PATH\)/(tweak|library|tool|application)\.mk' Makefile; then
-            echo "AVISO: não encontrei nenhum include de tweak.mk/library.mk/tool.mk no Makefile — o projeto pode não ser um projeto Theos padrão."
-          fi
-
-          echo "== Makefile final usado na compilação =="
-          cat Makefile
-
-          echo "== Compilando =="
-          # Passa THEOS=/opt/theos direto na linha de comando: isso tem prioridade máxima no make e
-          # sobrescreve qualquer "THEOS = /var/theos" (ou outro caminho) fixado dentro do Makefile do projeto.
-          make THEOS="$THEOS" clean package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless 2>&1 | tee /tmp/build.log
-          BUILD_EXIT=${PIPESTATUS[0]}
-
-          mkdir -p /tmp/artifacts
-          find . -name "*.deb" -exec cp {} /tmp/artifacts/ \;
-          find . -path "*/obj/*" -name "*.dylib" -exec cp {} /tmp/artifacts/ \;
-          cp /tmp/build.log /tmp/artifacts/build.log
-
-          # Só considera sucesso se o make retornou 0 E pelo menos um artefato (.deb ou .dylib) foi gerado.
-          ARTIFACT_COUNT=$(find /tmp/artifacts -name "*.deb" -o -name "*.dylib" | wc -l)
-          if [ "$BUILD_EXIT" -ne 0 ] || [ "$ARTIFACT_COUNT" -eq 0 ]; then
-            echo "ERRO: a compilação falhou ou não gerou nenhum .deb/.dylib. Veja build.log nos artefatos."
-            exit 1
-          fi
-          echo "Compilação concluída com sucesso: $ARTIFACT_COUNT artefato(s) gerado(s)."
-
-      - name: Publicar artefatos
+      - name: Upload .dylib
         uses: actions/upload-artifact@v4
         with:
-          name: build-output-${{ inputs.marker }}
-          path: /tmp/artifacts/*
-          retention-days: 3
+          name: tweak-dylib
+          path: |
+            .theos/obj/*.dylib
+            .theos/obj/debug/*.dylib
