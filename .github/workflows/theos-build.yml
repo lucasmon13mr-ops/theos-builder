@@ -1,4 +1,4 @@
-name: Build Tweak
+name: Build Tweak (Linux)
 
 on:   
   push:
@@ -9,30 +9,92 @@ on:
 
 jobs:
   build:
-    runs-on: macos-latest
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Theos
+      - name: Install dependencies
         run: |
-          git clone --recursive https://github.com/theos/theos.git $HOME/theos
-          echo "THEOS=$HOME/theos" >> $GITHUB_ENV
-          echo "$HOME/theos/bin" >> $GITHUB_PATH
+          sudo apt-get update -y
+          sudo apt-get install -y curl git perl make clang lld libtinfo-dev libssl-dev fakeroot rsync unzip xz-utils
 
-      - name: Install ldid
+      - name: Install Theos
+        env:
+          THEOS: /opt/theos
         run: |
-          brew install ldid
+          sudo git clone --recursive https://github.com/theos/theos.git $THEOS
+          echo "THEOS=$THEOS" >> $GITHUB_ENV
+          echo "$THEOS/bin" >> $GITHUB_PATH
+          if [ ! -f "$THEOS/makefiles/common.mk" ]; then
+            echo "ERRO: Theos não instalado corretamente"
+            sudo git -C $THEOS submodule update --init --recursive
+          fi
+          test -f "$THEOS/makefiles/common.mk" && echo "Theos OK"
+
+      - name: Install iOS SDK
+        env:
+          THEOS: /opt/theos
+        run: |
+          sudo git clone -n --depth=1 --filter=tree:0 https://github.com/theos/sdks.git /tmp/sdks
+          cd /tmp/sdks && sudo git sparse-checkout set --no-cone "iPhoneOS16.5.sdk" && sudo git checkout
+          sudo mkdir -p $THEOS/sdks
+          sudo mv /tmp/sdks/iPhoneOS16.5.sdk $THEOS/sdks/
+          ls $THEOS/sdks
+
+      - name: Install toolchain
+        env:
+          THEOS: /opt/theos
+        run: |
+          # Baixa o toolchain do repositório oficial
+          cd /tmp
+          sudo git clone https://github.com/theos/toolchain.git
+          cd toolchain
+          sudo ./install.sh
+          sudo cp -r toolchain $THEOS/
+          cd ..
+          sudo rm -rf toolchain
+          
+          # Verifica instalação
+          if [ ! -f "$THEOS/toolchain/linux/iphone/bin/clang" ]; then
+            echo "ERRO: toolchain não instalado. Tentando método alternativo..."
+            
+            # Método alternativo com URL específica
+            curl -L "https://github.com/L1ghtmann/llvm-project/releases/download/16.0.0/iOSToolchain.tar.xz" -o iOSToolchain.tar.xz
+            if [ -f iOSToolchain.tar.xz ] && file iOSToolchain.tar.xz | grep -q "XZ compressed"; then
+              sudo mkdir -p $THEOS/toolchain
+              sudo tar -xf iOSToolchain.tar.xz -C $THEOS/toolchain
+              sudo chown -R $(whoami) $THEOS/toolchain
+              rm iOSToolchain.tar.xz
+            else
+              echo "ERRO FATAL: Falha ao baixar toolchain"
+              exit 1
+            fi
+          fi
+          
+          test -f "$THEOS/toolchain/linux/iphone/bin/clang" || { echo "ERRO FATAL: toolchain não encontrado"; exit 1; }
+          echo "Toolchain OK: $($THEOS/toolchain/linux/iphone/bin/clang --version | head -n1)"
 
       - name: Build with Theos
+        env:
+          THEOS: /opt/theos
         run: |
+          # Se não tiver Makefile na raiz, procura
+          if [ ! -f Makefile ]; then
+            cd "$(find . -maxdepth 2 -name Makefile -exec dirname {} \; | head -n1)"
+          fi
+          
           make clean
-          make
+          make package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless
 
-      - name: Upload .dylib
+      - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: tweak-dylib
+          name: tweak-build
           path: |
             .theos/obj/*.dylib
             .theos/obj/debug/*.dylib
+            *.deb
+            packages/*.deb
+          retention-days: 3
