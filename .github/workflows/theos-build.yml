@@ -1,3 +1,6 @@
+# Substitua o conteúdo do arquivo .github/workflows/theos-build.yml
+# no seu repositório theos-builder por este aqui.
+
 name: theos-build
 
 on:
@@ -59,6 +62,20 @@ jobs:
           sudo mkdir -p $THEOS/sdks
           sudo mv /tmp/sdks/iPhoneOS16.5.sdk $THEOS/sdks/
           ls $THEOS/sdks
+
+      - name: Instalar o toolchain (compilador cross-platform Linux -> iOS)
+        env:
+          THEOS: /opt/theos
+        run: |
+          # Sem isso, o Theos não tem o clang/ld/ldid que geram código ARM64 pra iOS a partir do Linux.
+          # Esse é o mesmo toolchain que o script oficial de instalação do Theos usa.
+          curl -LO https://github.com/L1ghtmann/llvm-project/releases/latest/download/iOSToolchain.tar.xz
+          sudo mkdir -p $THEOS/toolchain
+          sudo tar -xf iOSToolchain.tar.xz -C $THEOS/toolchain
+          sudo chown -R $(whoami) $THEOS/toolchain
+          rm iOSToolchain.tar.xz
+          test -f "$THEOS/toolchain/linux/iphone/bin/clang" || { echo "ERRO FATAL: toolchain não instalado corretamente — clang não encontrado em $THEOS/toolchain/linux/iphone/bin/"; find $THEOS/toolchain -maxdepth 3; exit 1; }
+          echo "Toolchain OK: $($THEOS/toolchain/linux/iphone/bin/clang --version | head -n1)"
 
       - name: Compilar o projeto (make package)
         env:
